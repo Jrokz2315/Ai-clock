@@ -5,9 +5,9 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // ---------------------------------------------------------
-    // CORS preflight
-    // ---------------------------------------------------------
+    // =========================================================
+    // CORS PREFLIGHT
+    // =========================================================
 
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -16,93 +16,72 @@ export default {
       });
     }
 
-    // ---------------------------------------------------------
-    // Only GET / HEAD are supported
-    // ---------------------------------------------------------
+    // =========================================================
+    // METHODS
+    // =========================================================
 
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return plainResponse(
-        "error: method_not_allowed\n",
+      return htmlError(
         405,
+        "method_not_allowed",
+        "Only GET and HEAD are supported.",
         {
           Allow: "GET, HEAD, OPTIONS",
         }
       );
     }
 
-    const parts = url.pathname
-      .split("/")
-      .filter(Boolean);
+    // Normalize trailing slash except root.
+    let pathname = url.pathname;
+
+    if (pathname.length > 1 && pathname.endsWith("/")) {
+      pathname = pathname.slice(0, -1);
+    }
 
     // =========================================================
-    // LIVE CLOCK ENDPOINTS
+    // LIVE CLOCK
     //
-    // /fresh/TOKEN
-    // /clock/TOKEN
+    // PRIMARY:
+    // /time?nonce=TOKEN
     //
-    // TOKEN must be 16-32 alphanumeric characters.
+    // RETRY:
+    // /time2?nonce=TOKEN
+    //
+    // Stable paths are intentional.
+    // Only the query nonce changes.
     // =========================================================
 
-    if (
-      parts.length === 2 &&
-      (
-        parts[0] === "fresh" ||
-        parts[0] === "clock"
-      )
-    ) {
-      const route = parts[0];
-      const token = parts[1];
-
-      // -------------------------------------------------------
-      // Validate token
-      // -------------------------------------------------------
+    if (pathname === "/time" || pathname === "/time2") {
+      const token = url.searchParams.get("nonce") || "";
 
       if (!TOKEN_RE.test(token)) {
-        return plainResponse(
-          [
-            "AI_CLOCK_ERROR",
-            "error: invalid_token",
-            "requirement: token must be 16-32 alphanumeric characters",
-            "example: /fresh/K7x9p2Lm4Q8r1Vz6",
-            "END_AI_CLOCK_ERROR",
-            "",
-          ].join("\n"),
-          400
+        return htmlError(
+          400,
+          "invalid_nonce",
+          "nonce must contain 16-32 alphanumeric characters."
         );
       }
 
-      // -------------------------------------------------------
-      // Timezone
-      //
-      // Defaults to America/New_York.
-      // Optional ?tz= may be used for testing.
-      // -------------------------------------------------------
-
       const requestedTimezone =
-        url.searchParams.get("tz") ||
-        DEFAULT_TIMEZONE;
+        url.searchParams.get("tz") || DEFAULT_TIMEZONE;
 
-      const timezone =
-        isValidTimezone(requestedTimezone)
-          ? requestedTimezone
-          : DEFAULT_TIMEZONE;
+      const timezone = isValidTimezone(requestedTimezone)
+        ? requestedTimezone
+        : DEFAULT_TIMEZONE;
 
-      // -------------------------------------------------------
-      // Generate the clock snapshot
-      // -------------------------------------------------------
+      const route =
+        pathname === "/time"
+          ? "time"
+          : "time2";
 
-      const clock = buildClock(
+      const snapshot = buildClockSnapshot(
         token,
         timezone,
         route
       );
 
-      const body = buildPlainText(clock);
-      const headers = clockHeaders(clock);
-
-      // -------------------------------------------------------
-      // HEAD request
-      // -------------------------------------------------------
+      const body = renderClockHtml(snapshot);
+      const headers = clockHeaders(snapshot);
 
       if (request.method === "HEAD") {
         return new Response(null, {
@@ -111,10 +90,6 @@ export default {
         });
       }
 
-      // -------------------------------------------------------
-      // GET response
-      // -------------------------------------------------------
-
       return new Response(body, {
         status: 200,
         headers,
@@ -122,72 +97,100 @@ export default {
     }
 
     // =========================================================
-    // HEALTH ENDPOINT
+    // HEALTH CHECK
     // =========================================================
 
-    if (url.pathname === "/health") {
-      return plainResponse(
-        [
-          "AI_CLOCK_HEALTH",
-          "status: ok",
-          "primary_endpoint: /fresh/<TOKEN>",
-          "fallback_endpoint: /clock/<TOKEN>",
-          "default_timezone: America/New_York",
-          "response_format: text/plain",
-          "END_AI_CLOCK_HEALTH",
-          "",
-        ].join("\n"),
-        200
-      );
+    if (pathname === "/health") {
+      const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Clock Health</title>
+</head>
+<body>
+<h1>AI Clock Health</h1>
+<p>status: ok</p>
+<p>primary_endpoint: /time?nonce=TOKEN</p>
+<p>retry_endpoint: /time2?nonce=TOKEN</p>
+<p>default_timezone: America/New_York</p>
+<p>response_format: text/html</p>
+</body>
+</html>`;
+
+      return new Response(body, {
+        status: 200,
+        headers: basicHeaders(),
+      });
     }
 
     // =========================================================
-    // ROOT / HOMEPAGE
+    // ROOT
     //
     // Informational only.
-    // Lumo should NOT use this as the clock source.
+    // Do not use root as the live clock source.
     // =========================================================
 
-    if (
-      url.pathname === "/" ||
-      url.pathname === ""
-    ) {
-      return plainResponse(
-        [
-          "AI CLOCK",
-          "",
-          "This homepage is informational only.",
-          "",
-          "Use a unique token for every request.",
-          "",
-          "Primary endpoint:",
-          "/fresh/<16-32-character-alphanumeric-token>",
-          "",
-          "Fallback endpoint:",
-          "/clock/<16-32-character-alphanumeric-token>",
-          "",
-          "Example:",
-          "/fresh/K7x9p2Lm4Q8r1Vz6",
-          "",
-        ].join("\n"),
-        200
-      );
+    if (pathname === "/") {
+      const body = `<!doctype html>
+<html lang="en">
+
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Clock</title>
+</head>
+
+<body>
+
+<main>
+
+<h1>AI Clock</h1>
+
+<p>
+This service provides a fresh, nonce-verifiable server timestamp.
+</p>
+
+<h2>Primary endpoint</h2>
+
+<p>
+/time?nonce=&lt;16-32-character-alphanumeric-token&gt;
+</p>
+
+<h2>Retry endpoint</h2>
+
+<p>
+/time2?nonce=&lt;16-32-character-alphanumeric-token&gt;
+</p>
+
+<h2>Example</h2>
+
+<p>
+/time?nonce=K7x9p2Lm4Q8r1Vz6
+</p>
+
+<p>
+The returned request_nonce must exactly match the requested nonce.
+</p>
+
+</main>
+
+</body>
+</html>`;
+
+      return new Response(body, {
+        status: 200,
+        headers: basicHeaders(),
+      });
     }
 
     // =========================================================
-    // NOT FOUND
+    // 404
     // =========================================================
 
-    return plainResponse(
-      [
-        "AI_CLOCK_ERROR",
-        "error: not_found",
-        "primary_endpoint: /fresh/<TOKEN>",
-        "fallback_endpoint: /clock/<TOKEN>",
-        "END_AI_CLOCK_ERROR",
-        "",
-      ].join("\n"),
-      404
+    return htmlError(
+      404,
+      "not_found",
+      "Use /time?nonce=TOKEN"
     );
   },
 };
@@ -197,7 +200,7 @@ export default {
 // BUILD CLOCK SNAPSHOT
 // =============================================================
 
-function buildClock(
+function buildClockSnapshot(
   token,
   timezone,
   route
@@ -245,7 +248,7 @@ function buildClock(
   const today =
     `${year}-${month}-${day}`;
 
-  const localTime =
+  const localTime24h =
     `${hour}:${minute}:${second}`;
 
   const utcOffset =
@@ -254,7 +257,7 @@ function buildClock(
     );
 
   const localDatetime =
-    `${today}T${localTime}${utcOffset}`;
+    `${today}T${localTime24h}${utcOffset}`;
 
   return {
     request_nonce: token,
@@ -265,7 +268,7 @@ function buildClock(
       get("weekday"),
 
     local_time_24h:
-      localTime,
+      localTime24h,
 
     timezone,
 
@@ -296,93 +299,182 @@ function buildClock(
 
 
 // =============================================================
-// BUILD EXTRACTION-FRIENDLY RESPONSE
+// RENDER CLOCK HTML
 //
 // IMPORTANT:
 //
-// This intentionally returns plain text.
+// Everything Lumo needs is ordinary visible HTML text.
 //
-// Do NOT change this to HTML.
-// Do NOT put the fields in <pre>.
-// Do NOT make JSON the primary response.
+// Do NOT:
+// - convert this to text/plain
+// - put fields inside <pre>
+// - return JSON
+// - hide fields in JavaScript
+// - add nosnippet
+// - add noindex
 //
-// The goal is to make all required fields visible to AI webpage
-// extraction tools such as Lumo.
+// The goal is maximum compatibility with webpage extractors.
 // =============================================================
 
-function buildPlainText(clock) {
-  return [
-    "AI_CLOCK_FRESH_RESPONSE",
+function renderClockHtml(clock) {
+  const c =
+    Object.fromEntries(
+      Object.entries(clock).map(
+        ([key, value]) => [
+          key,
+          escapeHtml(String(value)),
+        ]
+      )
+    );
 
-    "",
+  return `<!doctype html>
 
-    // Nonce first so extraction systems see it immediately.
-    `request_nonce: ${clock.request_nonce}`,
+<html lang="en">
 
-    // Required clock fields.
-    `today: ${clock.today}`,
-    `weekday: ${clock.weekday}`,
-    `local_time_24h: ${clock.local_time_24h}`,
-    `timezone: ${clock.timezone}`,
-    `utc_offset: ${clock.utc_offset}`,
-    `generated_at_utc: ${clock.generated_at_utc}`,
+<head>
 
-    // Supporting fields.
-    `local_datetime: ${clock.local_datetime}`,
-    `unix_time_ms: ${clock.unix_time_ms}`,
-    `request_id: ${clock.request_id}`,
-    `route: ${clock.route}`,
-    `fresh_response: ${clock.fresh_response}`,
+<meta charset="utf-8">
 
-    "",
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1"
+>
 
-    // ---------------------------------------------------------
-    // Compact duplicate snapshot
-    //
-    // This gives extraction systems a second representation of
-    // the important data in case individual lines get omitted.
-    // ---------------------------------------------------------
+<title>
+AI Clock ${c.request_nonce}
+</title>
 
-    (
-      "clock_snapshot: " +
-      `request_nonce=${clock.request_nonce}; ` +
-      `date=${clock.today}; ` +
-      `weekday=${clock.weekday}; ` +
-      `time=${clock.local_time_24h}; ` +
-      `timezone=${clock.timezone}; ` +
-      `offset=${clock.utc_offset}; ` +
-      `generated_at_utc=${clock.generated_at_utc}`
-    ),
+</head>
 
-    "",
+<body>
 
-    // Repeat nonce near the end.
-    `request_nonce_repeat: ${clock.request_nonce_repeat}`,
+<main>
 
-    "",
+<h1>
+AI CLOCK CURRENT TIME
+</h1>
 
-    "END_AI_CLOCK_FRESH_RESPONSE",
 
-    "",
-  ].join("\n");
+<p>
+request_nonce: ${c.request_nonce}
+</p>
+
+
+<p>
+today: ${c.today}
+</p>
+
+
+<p>
+weekday: ${c.weekday}
+</p>
+
+
+<p>
+local_time_24h: ${c.local_time_24h}
+</p>
+
+
+<p>
+timezone: ${c.timezone}
+</p>
+
+
+<p>
+utc_offset: ${c.utc_offset}
+</p>
+
+
+<p>
+generated_at_utc: ${c.generated_at_utc}
+</p>
+
+
+<p>
+local_datetime: ${c.local_datetime}
+</p>
+
+
+<p>
+unix_time_ms: ${c.unix_time_ms}
+</p>
+
+
+<p>
+request_id: ${c.request_id}
+</p>
+
+
+<p>
+route: ${c.route}
+</p>
+
+
+<p>
+fresh_response: ${c.fresh_response}
+</p>
+
+
+<h2>
+Clock snapshot
+</h2>
+
+
+<p>
+clock_snapshot:
+request_nonce=${c.request_nonce};
+today=${c.today};
+weekday=${c.weekday};
+local_time_24h=${c.local_time_24h};
+timezone=${c.timezone};
+utc_offset=${c.utc_offset};
+generated_at_utc=${c.generated_at_utc};
+request_id=${c.request_id}
+</p>
+
+
+<h2>
+Verification
+</h2>
+
+
+<p>
+The request nonce for this response is
+${c.request_nonce}.
+</p>
+
+
+<p>
+request_nonce_repeat: ${c.request_nonce_repeat}
+</p>
+
+
+<p>
+END_AI_CLOCK_RESPONSE
+</p>
+
+</main>
+
+</body>
+
+</html>`;
 }
 
 
 // =============================================================
-// HEADERS FOR LIVE CLOCK RESPONSES
+// LIVE CLOCK HEADERS
 // =============================================================
 
 function clockHeaders(clock) {
   return {
-    // ---------------------------------------------------------
-    // Plain text is intentional.
-    // ---------------------------------------------------------
-
     "Content-Type":
-      "text/plain; charset=utf-8",
+      "text/html; charset=utf-8",
+
+    "Content-Language":
+      "en-US",
 
     // ---------------------------------------------------------
-    // Aggressive cache prevention.
+    // Prevent intermediary caching.
     // ---------------------------------------------------------
 
     "Cache-Control":
@@ -406,7 +498,8 @@ function clockHeaders(clock) {
     // ---------------------------------------------------------
     // Supporting verification headers.
     //
-    // Lumo should still verify request_nonce from the body.
+    // The visible BODY nonce remains the main validation field
+    // because webpage extractors may not expose HTTP headers.
     // ---------------------------------------------------------
 
     "X-Request-Nonce":
@@ -422,7 +515,9 @@ function clockHeaders(clock) {
       clock.route,
 
     // ---------------------------------------------------------
-    // Security / compatibility
+    // Basic security headers.
+    //
+    // Intentionally NO X-Robots-Tag here.
     // ---------------------------------------------------------
 
     "X-Content-Type-Options":
@@ -437,50 +532,99 @@ function clockHeaders(clock) {
 
 
 // =============================================================
-// GENERIC PLAIN TEXT RESPONSE
+// NORMAL PAGE HEADERS
 // =============================================================
 
-function plainResponse(
-  body,
-  status = 200,
+function basicHeaders() {
+  return {
+    "Content-Type":
+      "text/html; charset=utf-8",
+
+    "Content-Language":
+      "en-US",
+
+    "Cache-Control":
+      "no-store, no-cache, must-revalidate, max-age=0, s-maxage=0",
+
+    "CDN-Cache-Control":
+      "no-store",
+
+    "Cloudflare-CDN-Cache-Control":
+      "no-store",
+
+    "Pragma":
+      "no-cache",
+
+    "Expires":
+      "0",
+
+    "X-Content-Type-Options":
+      "nosniff",
+
+    ...corsHeaders(),
+  };
+}
+
+
+// =============================================================
+// HTML ERROR
+// =============================================================
+
+function htmlError(
+  status,
+  error,
+  message,
   extraHeaders = {}
 ) {
-  return new Response(
-    body,
-    {
-      status,
+  const safeError =
+    escapeHtml(String(error));
 
-      headers: {
-        "Content-Type":
-          "text/plain; charset=utf-8",
+  const safeMessage =
+    escapeHtml(String(message));
 
-        "Cache-Control":
-          "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0",
+  const body = `<!doctype html>
 
-        "CDN-Cache-Control":
-          "no-store",
+<html lang="en">
 
-        "Cloudflare-CDN-Cache-Control":
-          "no-store",
+<head>
+<meta charset="utf-8">
+<title>AI Clock Error</title>
+</head>
 
-        "Surrogate-Control":
-          "no-store",
+<body>
 
-        "Pragma":
-          "no-cache",
+<h1>
+AI CLOCK ERROR
+</h1>
 
-        "Expires":
-          "0",
+<p>
+error: ${safeError}
+</p>
 
-        "X-Content-Type-Options":
-          "nosniff",
+<p>
+message: ${safeMessage}
+</p>
 
-        ...corsHeaders(),
+<p>
+primary_endpoint: /time?nonce=TOKEN
+</p>
 
-        ...extraHeaders,
-      },
-    }
-  );
+<p>
+retry_endpoint: /time2?nonce=TOKEN
+</p>
+
+</body>
+
+</html>`;
+
+  return new Response(body, {
+    status,
+
+    headers: {
+      ...basicHeaders(),
+      ...extraHeaders,
+    },
+  });
 }
 
 
@@ -507,12 +651,18 @@ function isValidTimezone(timezone) {
 // =============================================================
 // UTC OFFSET NORMALIZATION
 //
-// Examples:
+// Possible Intl values include:
 //
-// GMT-04:00 -> -04:00
-// GMT-05:00 -> -05:00
-// GMT+00:00 -> +00:00
-// GMT-4     -> -04:00
+// GMT-04:00
+// GMT-05:00
+// GMT+00:00
+// GMT-4
+//
+// Desired:
+//
+// -04:00
+// -05:00
+// +00:00
 // =============================================================
 
 function normalizeOffset(
@@ -534,7 +684,6 @@ function normalizeOffset(
     return "+00:00";
   }
 
-  // Example:
   // -4 -> -04:00
 
   const hourOnly =
@@ -551,7 +700,6 @@ function normalizeOffset(
     );
   }
 
-  // Example:
   // -4:00 -> -04:00
 
   const hourMinute =
@@ -569,7 +717,6 @@ function normalizeOffset(
     );
   }
 
-  // Already normalized.
   if (
     /^[+-]\d{2}:\d{2}$/
       .test(value)
@@ -599,4 +746,18 @@ function corsHeaders() {
     "Access-Control-Expose-Headers":
       "X-Request-Nonce, X-Request-Id, X-Generated-At-UTC, X-AI-Clock-Route",
   };
+}
+
+
+// =============================================================
+// HTML ESCAPE
+// =============================================================
+
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
