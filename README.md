@@ -156,24 +156,3 @@ Leave the clock publicly readable for an ordinary unauthenticated AI fetch. Addi
 | Old code after a commit | Check whether the commit is on the connected production branch and whether the deployment succeeded. |
 | Page works but Lumo cannot read it | Enable web search, try the exact `/time` URL or HTML root, and run the marker test. Copying a fresh text snapshot remains the manual fallback. |
 | Lumo repeats the old verification code | Its retrieval may be cached or absent. Do not treat its answer as a verified live lookup. |
-
-## Tests and development
-
-Local logic/HTTP-handler tests use Node's built-in test runner:
-
-```
-node --test worker.test.js
-```
-
-Optional developer workflow (not required for browser-only setup):
-
-```
-npm install
-npm test
-npm run dev
-npm run deploy
-```
-
-`npm run deploy` requires Cloudflare authentication. The package declares Wrangler v4; npm resolves a compatible v4 version at install time. No dependency lockfile is supplied. Pin a reviewed version and commit a lockfile as part of a production dependency-management process.
-
-See `TEST-REPORT.md` for the checks completed on this package and the remaining deployment/retrieval checks.
