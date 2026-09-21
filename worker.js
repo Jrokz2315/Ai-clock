@@ -5,9 +5,11 @@
  */
 
 const DEFAULT_TIMEZONE = "America/New_York";
+const SERVICE_VERSION = "1.0.1";
+const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,96}$/;
 // Change this to a new private-to-your-test value, commit, and redeploy.
 // It is a PUBLIC retrieval-test marker, never a password or API key.
-const VERIFICATION_CODE = "clock-check-c78d42a1";
+const VERIFICATION_CODE = "clock-check-fresh-v101";
 
 const NO_CACHE_HEADERS = {
   "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
@@ -63,6 +65,7 @@ export function buildSnapshot(now, timeZone) {
     ? "+00:00" : parts.timeZoneName.replace(/^GMT/, "");
   return {
     service: "AI Clock",
+    service_version: SERVICE_VERSION,
     generated_at_utc: now.toISOString(),
     timezone: formatter.resolvedOptions().timeZone,
     today: date,
@@ -95,6 +98,9 @@ function renderText(snapshot) {
 
 function renderHtml(snapshot) {
   const zone = encodeURIComponent(snapshot.timezone);
+  // Keep request identity in format-switch links; never redirect to a bare URL.
+  const nonce = snapshot.request_nonce !== "none"
+    ? `&amp;nonce=${encodeURIComponent(snapshot.request_nonce)}` : "";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -104,8 +110,8 @@ function renderHtml(snapshot) {
 <p>Server-generated date and time. Reload this page for a new snapshot.
 No browser-side JavaScript is required.</p>
 <pre>${escapeHtml(renderText(snapshot))}</pre>
-<p><a href="/time?tz=${zone}">Plain text</a> |
-<a href="/time.json?tz=${zone}">JSON</a></p>
+<p><a href="/time?tz=${zone}${nonce}">Plain text</a> |
+<a href="/time.json?tz=${zone}${nonce}">JSON</a></p>
 <p>The timezone is a setting, not a reading of the visitor's device location.
 This clock is not independently checked against an external time authority.</p>
 </main></body></html>`;
@@ -134,17 +140,41 @@ export default {
       return response(request, "User-agent: *\nAllow: /\n");
     }
     if (url.pathname === "/favicon.ico") return response(request, null, 204);
-    if (!["/", "/time", "/time.json"].includes(url.pathname)) {
-      return response(request, "Not found. Use /, /time, or /time.json.\n", 404);
+    // A caller-chosen, never-reused token in the path gives each lookup a
+    // distinct URL even if a reader ignores query strings. This is NOT
+    // authentication or a cryptographic proof of freshness.
+    const freshMatch = /^\/fresh\/([A-Za-z0-9_-]{16,96})\/?$/.exec(url.pathname);
+    if (url.pathname.startsWith("/fresh") && !freshMatch) {
+      return response(request,
+        "Invalid fresh URL. Use /fresh/ followed by 16-96 letters, digits, hyphens, or underscores.\n", 400);
     }
+    if (!["/", "/time", "/time.json"].includes(url.pathname) && !freshMatch) {
+      return response(request, "Not found. Use /, /time, /time.json, or /fresh/<token>.\n", 404);
+    }
+    const queryNonces = url.searchParams.getAll("nonce");
+    if (queryNonces.length > 1 ||
+        (queryNonces.length === 1 && !NONCE_PATTERN.test(queryNonces[0]))) {
+      return response(request,
+        "Invalid nonce. Supply one value using 16-96 letters, digits, hyphens, or underscores.\n", 400);
+    }
+    const pathNonce = freshMatch?.[1];
+    const queryNonce = queryNonces[0];
+    if (pathNonce && queryNonce && pathNonce !== queryNonce) {
+      return response(request, "Path and query nonces must match.\n", 400);
+    }
+    const requestNonce = pathNonce ?? queryNonce ?? "none";
     const format = url.searchParams.get("format") ??
-      (url.pathname === "/" ? "html" : url.pathname === "/time.json" ? "json" : "text");
+      ((url.pathname === "/" || freshMatch) ? "html" : url.pathname === "/time.json" ? "json" : "text");
     if (!["text", "html", "json"].includes(format)) {
       return response(request, "Invalid format. Use text, html, or json.\n", 400);
     }
     try {
       // Read the runtime clock inside the handler, never at module startup.
       const snapshot = buildSnapshot(new Date(), url.searchParams.get("tz") ?? DEFAULT_TIMEZONE);
+      // Echo only the validated routing token, never arbitrary request content.
+      // The reader should compare it with the token it actually requested.
+      snapshot.request_nonce = requestNonce;
+      snapshot.request_nonce_source = pathNonce ? "path" : queryNonce ? "query" : "not supplied";
       const body = format === "json" ? JSON.stringify(snapshot, null, 2) + "\n"
         : format === "html" ? renderHtml(snapshot) : renderText(snapshot);
       const type = { text: "text/plain", html: "text/html", json: "application/json" }[format];
@@ -152,6 +182,8 @@ export default {
       // noindex does not require login or prevent direct URL retrieval.
       return response(request, body, 200, type, {
         "X-Robots-Tag": "noindex, noarchive",
+        "X-AI-Clock-Version": SERVICE_VERSION,
+        "X-AI-Clock-Request-Id": snapshot.request_id,
       });
     } catch (error) {
       if (error instanceof RangeError) {
